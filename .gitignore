@@ -1,0 +1,10 @@
+node_modules/
+dist/
+vendor/
+.env
+*.env
+*.sql
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
