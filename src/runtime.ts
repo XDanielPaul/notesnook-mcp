@@ -2,6 +2,10 @@
 import { DOMParser } from "linkedom";
 import WebSocket from "ws";
 import { initLocale } from "@notesnook/intl";
+import { restrictFetch } from "./network.js";
+
+// Do not forward authentication request bodies through redirects.
+globalThis.fetch = restrictFetch(globalThis.fetch);
 
 // stdout is reserved for MCP JSON-RPC / command output: route library chatter to stderr.
 console.log = console.info = console.debug = console.error;

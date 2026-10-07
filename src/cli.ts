@@ -2,14 +2,19 @@
 import { parseArgs } from "node:util";
 import { rmSync } from "node:fs";
 import { prompt } from "./prompt.js";
-import { Hosts, readConfig, resolveHosts, writeConfig } from "./config.js";
-import { APP_DIR, isDefaultAppDir } from "./paths.js";
+import { assertNewProfile, readConfig, resolveHosts, validateHosts, writeConfig } from "./config.js";
+import { APP_DIR, ensureAppDir, isDefaultAppDir } from "./paths.js";
 import { deleteSecret } from "./secrets.js";
+import { acquireProfileLock } from "./profile-lock.js";
+import { revokeSession } from "./logout.js";
 
 const log = (...args: unknown[]) => console.error(...args);
 
 async function checkServer(url: string) {
-  const res = await fetch(`${url.replace(/\/$/, "")}/version`);
+  const res = await fetch(`${url.replace(/\/$/, "")}/version`, {
+    redirect: "error",
+    signal: AbortSignal.timeout(20_000)
+  });
   if (!res.ok) throw new Error(`${url}/version returned HTTP ${res.status}`);
   return res.text();
 }
@@ -24,15 +29,32 @@ async function login(argv: string[]) {
       monograph: { type: "string" }
     }
   });
+  if (readConfig()) {
+    resolveHosts({
+      API_HOST: values.api,
+      AUTH_HOST: values.auth,
+      SSE_HOST: values.sse,
+      MONOGRAPH_HOST: values.monograph
+    });
+    const { openDatabase } = await import("./db.js");
+    const opened = await openDatabase();
+    try {
+      await authenticate(opened.db);
+    } finally {
+      await opened.close();
+    }
+    return;
+  }
+  assertNewProfile();
   const current = resolveHosts();
   const ask = async (label: string, flag?: string, def?: string) =>
     flag || (await prompt(`${label}${def ? ` [${def}]` : ""}: `)) || def || "";
-  const hosts: Hosts = {
+  const hosts = validateHosts({
     API_HOST: await ask("Sync server URL (API_HOST)", values.api, current?.API_HOST),
     AUTH_HOST: await ask("Auth server URL (AUTH_HOST)", values.auth, current?.AUTH_HOST),
     SSE_HOST: await ask("Events server URL (SSE_HOST)", values.sse, current?.SSE_HOST),
     MONOGRAPH_HOST: values.monograph || current?.MONOGRAPH_HOST
-  };
+  });
   if (!hosts.API_HOST || !hosts.AUTH_HOST || !hosts.SSE_HOST)
     throw new Error("API, auth and events server URLs are required.");
   for (const k of ["API_HOST", "AUTH_HOST", "SSE_HOST"] as const) {
@@ -42,47 +64,48 @@ async function login(argv: string[]) {
   writeConfig({ ...readConfig(), hosts });
   const { openDatabase } = await import("./db.js");
   const opened = await openDatabase({ createKey: true });
-  const { db } = opened;
-
-  const existing = await db.user.getUser();
-  if (existing) {
-    log(`Already logged in as ${existing.email}. Run \`notesnook-mcp logout\` first to switch accounts.`);
-    await opened.close();
-    return;
-  }
-
   try {
-    const email = (await prompt("Email: ")).toLowerCase();
-    const mfa = (await db.user.authenticateEmail(email)) as
-      | { primaryMethod?: string; secondaryMethod?: string; phoneNumber?: string }
-      | undefined;
-
-    const methods = [mfa?.primaryMethod, mfa?.secondaryMethod, "recoveryCode"].filter(
-      (m, i, a): m is string => !!m && a.indexOf(m) === i
-    );
-    let method = methods[0] ?? "app";
-    if (methods.length > 1) {
-      const choice = await prompt(`2FA method (${methods.join("/")}) [${method}]: `);
-      if (choice) {
-        if (!methods.includes(choice)) throw new Error(`Unknown 2FA method: ${choice}`);
-        method = choice;
-      }
-    }
-    if (method === "email" || method === "sms") {
-      await db.mfa.sendCode(method);
-      log(`A 2FA code was sent via ${method}${mfa?.phoneNumber ? ` to ${mfa.phoneNumber}` : ""}.`);
-    }
-    const code = await prompt(`2FA code (${method}): `);
-    await db.user.authenticateMultiFactorCode(code, method);
-
-    const password = await prompt("Password: ", { hidden: true });
-    await db.user.authenticatePassword(email, password);
-    writeConfig({ ...readConfig()!, email });
-    log(`Logged in as ${email}. Running initial sync...`);
-    await doSync(db, false);
+    await authenticate(opened.db);
   } finally {
     await opened.close();
   }
+}
+
+async function authenticate(db: Awaited<ReturnType<typeof import("./db.js")["openDatabase"]>>["db"]) {
+  const existing = await db.user.getUser();
+  if (existing) {
+    log(`Already logged in as ${existing.email}. Run \`notesnook-mcp logout\` first to switch accounts.`);
+    return;
+  }
+
+  const email = (await prompt("Email: ")).toLowerCase();
+  const mfa = (await db.user.authenticateEmail(email)) as
+    | { primaryMethod?: string; secondaryMethod?: string; phoneNumber?: string }
+    | undefined;
+
+  const methods = [mfa?.primaryMethod, mfa?.secondaryMethod, "recoveryCode"].filter(
+    (m, i, a): m is string => !!m && a.indexOf(m) === i
+  );
+  let method = methods[0] ?? "app";
+  if (methods.length > 1) {
+    const choice = await prompt(`2FA method (${methods.join("/")}) [${method}]: `);
+    if (choice) {
+      if (!methods.includes(choice)) throw new Error(`Unknown 2FA method: ${choice}`);
+      method = choice;
+    }
+  }
+  if (method === "email" || method === "sms") {
+    await db.mfa.sendCode(method);
+    log(`A 2FA code was sent via ${method}${mfa?.phoneNumber ? ` to ${mfa.phoneNumber}` : ""}.`);
+  }
+  const code = await prompt(`2FA code (${method}): `);
+  await db.user.authenticateMultiFactorCode(code, method);
+
+  const password = await prompt("Password: ", { hidden: true });
+  await db.user.authenticatePassword(email, password);
+  writeConfig({ ...readConfig()!, email });
+  log(`Logged in as ${email}. Running initial sync...`);
+  await doSync(db, false);
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -108,6 +131,12 @@ async function withDb<T>(fn: (db: Awaited<ReturnType<typeof import("./db.js")["o
 
 async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
+  if (["login", "sync", "status", "list", "logout", "serve"].includes(cmd)) {
+    ensureAppDir();
+    const release = acquireProfileLock(APP_DIR);
+    // Hold the lock until process exit, including long-lived stdio serving.
+    process.once("exit", release);
+  }
   switch (cmd) {
     case "login":
       await login(rest);
@@ -144,18 +173,21 @@ async function main() {
         const { openDatabase } = await import("./db.js");
         const opened = await openDatabase();
         try {
-          await opened.db.user.logout(true);
+          await revokeSession(opened.db, resolveHosts()!.AUTH_HOST);
         } finally {
           await opened.close();
         }
       } catch (e) {
-        log("Remote logout failed (continuing with local wipe):", (e as Error).message);
+        throw new Error(
+          `Logout was not completed; local data and keys were retained. ${(e as Error).message} ` +
+          "Retry when the server is reachable. If necessary, revoke this session using the Notesnook app's session settings."
+        );
       }
       deleteSecret("session-token");
       deleteSecret("user-encryption-key");
       deleteSecret("db-key");
       rmSync(APP_DIR, { recursive: true, force: true });
-      log("Logged out; local database, config and Keychain entries removed.");
+      log("Logout completed; local database, config and Keychain entries removed.");
       break;
     }
     case "serve":

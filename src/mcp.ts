@@ -6,6 +6,7 @@ import { openDatabase } from "./db.js";
 import { NotesnookSync } from "./sync.js";
 import { bodyToHtml } from "./format.js";
 import { escapeHtml, fillTemplate, templateVariables } from "./templates.js";
+import { SerialQueue } from "./serial-queue.js";
 
 const ALLOW_WRITE = process.env.NOTESNOOK_MCP_ALLOW_WRITE === "1";
 const MAX_CHARS = Number(process.env.NOTESNOOK_MCP_MAX_NOTE_CHARS) || 100_000;
@@ -70,6 +71,7 @@ export async function serve() {
   }
 
   const syncer = new NotesnookSync(db, ALLOW_WRITE);
+  const updates = new SerialQueue();
   // Initial sync in the background so the MCP handshake isn't delayed.
   syncer.sync("startup").catch(() => {});
 
@@ -266,7 +268,7 @@ export async function serve() {
         },
         annotations: { readOnlyHint: false, destructiveHint: true }
       },
-      async ({ id, title, content, format, mode }) => {
+      async ({ id, title, content, format, mode }) => updates.run(async () => {
         await syncer.ensureFresh();
         const note = await db.notes.note(id);
         if (!note) return fail(`Note ${id} not found.`);
@@ -287,7 +289,7 @@ export async function serve() {
         }
         await db.notes.add(update);
         return text({ id, ...(await syncAfterWrite(syncer, "update_note")) });
-      }
+      })
     );
 
     server.registerTool(
