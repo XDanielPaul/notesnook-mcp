@@ -158,32 +158,6 @@ async function main() {
       log("Logged out; local database, config and Keychain entries removed.");
       break;
     }
-    case "import-tolaria": {
-      const { values, positionals } = parseArgs({
-        args: rest,
-        allowPositionals: true,
-        options: { "dry-run": { type: "boolean" }, notebook: { type: "string" } }
-      });
-      const vault = positionals[0];
-      if (!vault) throw new Error("Usage: notesnook-mcp import-tolaria <vault-path> [--dry-run] [--notebook NAME]");
-      const rootNotebook = values.notebook || undefined;
-      const { planImport, describePlan, runImport } = await import("./tolaria.js");
-      if (values["dry-run"]) {
-        process.stdout.write(describePlan(planImport(vault), rootNotebook) + "\n");
-        break;
-      }
-      if (process.env.NOTESNOOK_MCP_ALLOW_WRITE !== "1")
-        throw new Error("Importing writes to your account. Set NOTESNOOK_MCP_ALLOW_WRITE=1 (try --dry-run first).");
-      await withDb(async (db) => {
-        const { NotesnookSync } = await import("./sync.js");
-        const syncer = new NotesnookSync(db, true);
-        await syncer.sync("import (pre)");
-        const result = await runImport(db, vault, rootNotebook, log);
-        await syncer.sync("import (push)");
-        log(`Import done: ${result.created} created, ${result.updated} updated, ${result.skipped} skipped. Synced.`);
-      });
-      break;
-    }
     case "serve":
       await (await import("./mcp.js")).serve();
       return;
@@ -194,8 +168,6 @@ async function main() {
   sync [--push]                             Pull changes; push requires NOTESNOOK_MCP_ALLOW_WRITE=1
   status                                    Show account and local counts
   list [N]                                  List the N most recently edited notes
-  import-tolaria <vault> [--dry-run] [--notebook NAME]
-                                            Import a Tolaria vault (needs NOTESNOOK_MCP_ALLOW_WRITE=1)
   logout                                    Revoke session, wipe local DB + Keychain items
   serve                                     Run the MCP server on stdio`);
       process.exitCode = cmd ? 1 : 0;

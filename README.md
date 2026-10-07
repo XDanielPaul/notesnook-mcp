@@ -61,28 +61,6 @@ Start the stdio server with `node dist/cli.js serve`. It syncs on startup and be
 
 Writes are disabled unless `NOTESNOOK_MCP_ALLOW_WRITE=1` is set in the MCP server's environment. When enabled, `create_note(title, content, format?, notebookId?, tagIds?)` and `update_note(id, title?, content?, format?, mode?)` are available. Updates append content by default; choose `mode: "replace"` to replace it. Organization tools are also enabled: `create_notebook(title, description?, parentId?)` (nested notebooks), `create_tag(title)` and `organize_note(id, notebookIds?, tagIds?, pinned?, favorite?)` (add-only), plus `create_from_template` (see Templates). Link notes in markdown with `[text](nn://note/<noteId>)`. The write tools sync changes back to the server. There is no delete tool.
 
-## Import a Tolaria vault
-
-```sh
-node dist/cli.js import-tolaria "/path/to/vault" --dry-run          # preview, writes nothing
-NOTESNOOK_MCP_ALLOW_WRITE=1 node dist/cli.js import-tolaria "/path/to/vault" [--notebook PARENT]
-```
-
-Mapping (Tolaria → Notesnook):
-
-- `type:` → one top-level notebook per type (`Project`, `Daily Log`, …); folders → nested notebooks (`work / clients`).
-- `--notebook PARENT` optionally nests all of those under one parent notebook (none by default).
-- `tags:` → tags; `status:` → `status/<value>` tag; `archived: true` → archived note.
-- First `# H1` (or `title:`, or the filename) → note title.
-- `[[wikilinks]]` (by filename, path, title or alias) → Notesnook note links (`nn://note/<id>`), which also show as backlinks. Unresolved links become plain text.
-- Relationship fields (`belongs_to`, `related_to`, any field with wikilinks) and other properties → a property list at the top of the note.
-- Sheet notes (`_display: sheet`) → markdown table (formulas kept as text). Callouts → bold-labelled quotes.
-- Type definitions (`type: Type`) that contain a template (`template:` property or body after the `# TypeName` heading) → template notes in a `Templates` notebook (see below); empty ones are skipped.
-- Existing notebooks with the same name (and parent) are reused, not duplicated.
-- Skipped: Tolaria's Getting Started sample notes, `_` system properties, saved views, images/attachments and non-markdown files.
-
-Re-running is idempotent: the file → note-id map is stored in `tolaria-import.json` in the data dir, so existing notes are updated (title/content replaced from the vault) instead of duplicated. Nothing is ever deleted.
-
 ## Templates
 
 Notesnook has no built-in note templates, so the MCP treats every note in a notebook named `Templates` (override with `NOTESNOOK_MCP_TEMPLATES_NOTEBOOK`) as a template:
@@ -90,7 +68,7 @@ Notesnook has no built-in note templates, so the MCP treats every note in a note
 - `list_templates` lists them.
 - `create_from_template(templateId, title?, notebookId?, tagIds?, variables?)` (write mode) copies the template, fills `{{date}}` (YYYY-MM-DD), `{{time}}`, `{{weekday}}`, `{{title}}` and any custom `{{name}}` from `variables`, titles the note `{{date}}` by default, and files it in the notebook with the same name as the template (template "Daily Log" → notebook "Daily Log") unless `notebookId` is given.
 
-Create templates in the Notesnook app (add a note to the `Templates` notebook) or import them from Tolaria types.
+Create templates in the Notesnook app by adding notes to the `Templates` notebook.
 
 ## Register in Copilot CLI
 
@@ -150,7 +128,7 @@ Add the same `"env"` object above only if write tools are intentionally enabled.
 npm test
 ```
 
-The automated tests cover crypto initialization, markdown/text conversion, import planning, templates, and the read-only versus push-enabled sync modes. A real account login and server sync require the user to run `login` interactively.
+The automated tests cover crypto initialization, markdown/text conversion, templates, and the read-only versus push-enabled sync modes. A real account login and server sync require the user to run `login` interactively.
 
 Account login, MFA and authenticated sync have not yet been exercised end-to-end. Before relying on this server with your account, run `login` and `status`, then verify that `list` and an MCP `get_note` return the expected contents. Leave write mode disabled until you have also tested writes on notes you can afford to restore.
 
